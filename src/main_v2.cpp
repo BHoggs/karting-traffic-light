@@ -1,16 +1,6 @@
 // ============================================================
-//  Traffic Light Controller  v2
+//  Traffic Light Controller v2
 //  Refactored with structs and a generic state-machine pattern.
-//
-//  NOTE: PlatformIO compiles every .cpp in src/ together.
-//        When activating this file, either delete or rename
-//        main.cpp (e.g. main.cpp.bak) to avoid duplicate
-//        setup()/loop() linker errors.
-//
-//  NOTE: Pins 0 (RX) and 1 (TX) are wired to the Serial port
-//        on the Uno.  They are kept here to match the existing
-//        hardware wiring.  If you need Serial debug output,
-//        rewire sensor A to a free pin pair (e.g. 11 / 12).
 // ============================================================
 
 #include <Arduino.h>
