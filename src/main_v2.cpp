@@ -222,7 +222,7 @@ void updateTrafficLight(TrafficLight& light, unsigned long now) {
             if (triggered) {
                 light.redTimer = now; // extend while object is still present
             }
-            if (now - light.redTimer >= redDur) {
+            else if (now - light.redTimer >= redDur) {
                 setLightState(light, GREEN);
             }
             break;
