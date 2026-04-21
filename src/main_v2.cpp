@@ -20,6 +20,7 @@ constexpr unsigned long RED_DURATION_MAX     = 120000UL; // ms (120 s)
 constexpr unsigned long DEBOUNCE_DELAY       =  200UL;  // ms
 constexpr unsigned long LCD_UPDATE_INTERVAL  =  500UL;  // ms
 constexpr unsigned long LED_TOGGLE_INTERVAL  =  500UL;  // ms
+constexpr unsigned long GREEN_COOLDOWN       = 1500UL;  // ms
 
 // Analog-keypad upper thresholds (one resistor ladder on A0)
 constexpr int BTN_RIGHT_MAX  =  60;
@@ -54,6 +55,7 @@ struct TrafficLight {
     float         distance; // Latest sensor reading in cm; -1 = no echo
     LightState    state;
     unsigned long redTimer; // millis() when RED was entered / last extended
+    unsigned long greenCooldownUntil; // millis() until GREEN can retrigger
 };
 
 // User-adjustable settings (read and written only in loop())
@@ -74,9 +76,9 @@ struct DisplayCache {
 
 hd44780_pinIO lcd(LCD_RS, LCD_EN, LCD_DB4, LCD_DB5, LCD_DB6, LCD_DB7);
 
-//                      trig  echo  green  red   lbl  row  dist   state   timer
-TrafficLight lightA = {  11,  12,    A5,   A4,  'A',  0, 0.0f, GREEN,  0 };
-TrafficLight lightB = {   2,   3,    A3,   A2,  'B',  1, 0.0f, GREEN,  0 };
+//                      trig  echo  green  red   lbl  row  dist   state   redTimer cooldown
+TrafficLight lightA = {  11,  12,    A5,   A4,  'A',  0, 0.0f, GREEN,      0,        0 };
+TrafficLight lightB = {   2,   3,    A3,   A2,  'B',  1, 0.0f, GREEN,      0,        0 };
 
 Settings       settings     = { 50, 5000UL };
 DisplayCache   displayCache = { -1, 0UL }; // -1 forces the first draw
@@ -132,8 +134,12 @@ void setup() {
 void loop() {
     unsigned long now = millis();
 
-    lightA.distance = readUltrasonicDistance(lightA.trigPin, lightA.echoPin);
-    lightB.distance = readUltrasonicDistance(lightB.trigPin, lightB.echoPin);
+    lightA.distance = (lightA.state == GREEN && now < lightA.greenCooldownUntil)
+                      ? -1.0f
+                      : readUltrasonicDistance(lightA.trigPin, lightA.echoPin);
+    lightB.distance = (lightB.state == GREEN && now < lightB.greenCooldownUntil)
+                      ? -1.0f
+                      : readUltrasonicDistance(lightB.trigPin, lightB.echoPin);
 
     updateTrafficLight(lightA, now);
     updateTrafficLight(lightB, now);
@@ -206,13 +212,14 @@ void setLightState(TrafficLight& light, LightState newState) {
 void updateTrafficLight(TrafficLight& light, unsigned long now) {
     const int           trigDist  = settings.triggerDistance;
     const unsigned long redDur    = settings.redDuration;
+    const bool          greenLocked = (light.state == GREEN && now < light.greenCooldownUntil);
     // A reading of -1 means no echo: don't treat as a trigger
     const bool          triggered = (light.distance > 0.0f && light.distance < trigDist);
 
     switch (light.state) {
 
         case GREEN:
-            if (triggered) {
+            if (!greenLocked && triggered) {
                 setLightState(light, RED);
                 light.redTimer = now;
             }
@@ -224,6 +231,7 @@ void updateTrafficLight(TrafficLight& light, unsigned long now) {
             }
             else if (now - light.redTimer >= redDur) {
                 setLightState(light, GREEN);
+                light.greenCooldownUntil = now + GREEN_COOLDOWN;
             }
             break;
     }
@@ -251,7 +259,7 @@ float readUltrasonicDistance(int trigPin, int echoPin) {
 // ============================================================
 
 // Renders the left half of one LCD row for a traffic-light channel:
-//   GREEN state:  "SA:123  "  (distance in cm, or "---" on timeout)
+//   GREEN state:  "SA:123  "  (distance in cm, or "---" on timeout / cooldown)
 //   RED   state:  "SA:ST-3 "  (seconds remaining before turning green)
 void updateLCDRow(const TrafficLight& light, unsigned long now) {
     char buf[9];

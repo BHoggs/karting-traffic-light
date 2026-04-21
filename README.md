@@ -4,7 +4,7 @@ A PlatformIO project for an Arduino Uno that powers the traffic light system use
 
 ## Overview
 
-Two independent traffic light channels (A and B) each use an ultrasonic sensor to detect an approaching kart. When a kart comes within the configured trigger distance, the corresponding light switches from green to red via a relay, holding it red for a configurable duration before automatically resetting.
+Two independent traffic light channels (A and B) each use an ultrasonic sensor to detect an approaching kart. When a kart comes within the configured trigger distance, the corresponding light switches from green to red via a relay, holding it red for a configurable duration before automatically resetting. After returning to green, that side stays locked green for 1.5 seconds and ignores ultrasonic input during the cooldown.
 
 Settings (trigger distance and red-light hold time) are adjustable at runtime using an analog keypad, with live feedback shown on a 16×2 LCD display.
 
