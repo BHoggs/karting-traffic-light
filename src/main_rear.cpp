@@ -1,5 +1,5 @@
 // ============================================================
-//  Traffic Light Controller v2
+//  Traffic Light Controller v3
 //  Refactored with structs and a generic state-machine pattern.
 // ============================================================
 
@@ -8,35 +8,14 @@
 #include <hd44780ioClass/hd44780_pinIO.h>
 #include <PinChangeInterrupt.h>
 #include <math.h>   // ceil()
+#include "pit_bay_shared.h"
 
 // ============================================================
 //  Compile-time constants
 // ============================================================
 
-constexpr int           DISTANCE_STEP        =    5;    // cm
-constexpr int           DISTANCE_MAX         =  150;    // cm
-constexpr unsigned long TIME_STEP            = 1000UL;  // ms
-constexpr unsigned long RED_DURATION_MAX     = 120000UL; // ms (120 s)
-constexpr unsigned long DEBOUNCE_DELAY       =  200UL;  // ms
-constexpr unsigned long LCD_UPDATE_INTERVAL  =  500UL;  // ms
-constexpr unsigned long LED_TOGGLE_INTERVAL  =  500UL;  // ms
-constexpr unsigned long GREEN_COOLDOWN       = 1500UL;  // ms
-
-// Analog-keypad upper thresholds (one resistor ladder on A0)
-constexpr int BTN_RIGHT_MAX  =  60;
-constexpr int BTN_UP_MAX     = 200;
-constexpr int BTN_DOWN_MAX   = 400;
-constexpr int BTN_LEFT_MAX   = 600;
-constexpr int BTN_SELECT_MAX = 800;
-
-// Pin assignments
-constexpr int BUTTON_PIN = A0;
-constexpr int LCD_RS     =  8;
-constexpr int LCD_EN     =  9;
-constexpr int LCD_DB4    =  4;
-constexpr int LCD_DB5    =  5;
-constexpr int LCD_DB6    =  6;
-constexpr int LCD_DB7    =  7;
+// Rear-specific constants (shared constants are in pit_bay_shared.h)
+constexpr unsigned long GREEN_COOLDOWN = 1500UL;  // ms
 
 // ============================================================
 //  Types
@@ -56,18 +35,7 @@ struct TrafficLight {
     LightState    state;
     unsigned long redTimer; // millis() when RED was entered / last extended
     unsigned long greenCooldownUntil; // millis() until GREEN can retrigger
-};
-
-// User-adjustable settings (read and written only in loop())
-struct Settings {
-    int           triggerDistance; // cm
-    unsigned long redDuration;     // ms
-};
-
-// Cached copies of displayed settings — avoids redundant LCD writes
-struct DisplayCache {
-    int           triggerDistance;
-    unsigned long redDuration;
+    uint8_t       triggerCount;       // consecutive sensor hits in GREEN (noise filter)
 };
 
 // ============================================================
@@ -76,9 +44,9 @@ struct DisplayCache {
 
 hd44780_pinIO lcd(LCD_RS, LCD_EN, LCD_DB4, LCD_DB5, LCD_DB6, LCD_DB7);
 
-//                      trig  echo  green  red   lbl  row  dist   state   redTimer cooldown
-TrafficLight lightA = {  11,  12,    A5,   A4,  'A',  0, 0.0f, GREEN,      0,        0 };
-TrafficLight lightB = {   2,   3,    A3,   A2,  'B',  1, 0.0f, GREEN,      0,        0 };
+//                      trig  echo  green  red   lbl  row  dist   state   redTimer cooldown  trgCnt
+TrafficLight lightA = {  11,  12,    A5,   A4,  'A',  0, 0.0f, GREEN,      0,        0,       0 };
+TrafficLight lightB = {   2,   3,    A3,   A2,  'B',  1, 0.0f, GREEN,      0,        0,       0 };
 
 Settings       settings     = { 50, 5000UL };
 DisplayCache   displayCache = { -1, 0UL }; // -1 forces the first draw
@@ -95,7 +63,6 @@ volatile bool  buttonPressedFlag = false; // set by ISR, processed in loop()
 
 void  initTrafficLight(const TrafficLight& light);
 void  setLightState(TrafficLight& light, LightState newState);
-float readUltrasonicDistance(int trigPin, int echoPin);
 void  updateTrafficLight(TrafficLight& light, unsigned long now);
 void  updateLCDRow(const TrafficLight& light, unsigned long now);
 void  updateLCDDisplay(unsigned long now);
@@ -152,20 +119,7 @@ void loop() {
         buttonPressedFlag = false;
         if (now - lastButtonTime > DEBOUNCE_DELAY) {
             lastButtonTime = now;
-            int x = analogRead(BUTTON_PIN);
-            if (x < BTN_RIGHT_MAX) {
-                if (settings.triggerDistance + DISTANCE_STEP <= DISTANCE_MAX)
-                    settings.triggerDistance += DISTANCE_STEP;
-            } else if (x < BTN_UP_MAX) {
-                if (settings.redDuration + TIME_STEP <= RED_DURATION_MAX)
-                    settings.redDuration += TIME_STEP;
-            } else if (x < BTN_DOWN_MAX) {
-                settings.redDuration = (settings.redDuration > TIME_STEP)
-                                       ? settings.redDuration - TIME_STEP : 0UL;
-            } else if (x < BTN_LEFT_MAX) {
-                settings.triggerDistance = (settings.triggerDistance > DISTANCE_STEP)
-                                           ? settings.triggerDistance - DISTANCE_STEP : 0;
-            }
+            handleButtonPress(BUTTON_PIN, settings);
             // Redraw immediately so the new value is visible without delay
             updateLCDDisplay(now);
             lastLcdUpdate = now;
@@ -211,7 +165,7 @@ void setLightState(TrafficLight& light, LightState newState) {
 
 void updateTrafficLight(TrafficLight& light, unsigned long now) {
     const int           trigDist  = settings.triggerDistance;
-    const unsigned long redDur    = settings.redDuration;
+    const unsigned long redDur    = settings.timerDuration;
     const bool          greenLocked = (light.state == GREEN && now < light.greenCooldownUntil);
     // A reading of -1 means no echo: don't treat as a trigger
     const bool          triggered = (light.distance > 0.0f && light.distance < trigDist);
@@ -220,8 +174,13 @@ void updateTrafficLight(TrafficLight& light, unsigned long now) {
 
         case GREEN:
             if (!greenLocked && triggered) {
-                setLightState(light, RED);
-                light.redTimer = now;
+                if (++light.triggerCount >= 3) {
+                    setLightState(light, RED);
+                    light.redTimer     = now;
+                    light.triggerCount = 0;
+                }
+            } else {
+                light.triggerCount = 0;
             }
             break;
 
@@ -235,23 +194,6 @@ void updateTrafficLight(TrafficLight& light, unsigned long now) {
             }
             break;
     }
-}
-
-// ============================================================
-//  Sensor
-// ============================================================
-
-// Returns distance in cm, or -1.0 on timeout (no echo within 30 ms ~ 5 m)
-float readUltrasonicDistance(int trigPin, int echoPin) {
-    digitalWrite(trigPin, LOW);
-    delayMicroseconds(2);
-    digitalWrite(trigPin, HIGH);
-    delayMicroseconds(10);
-    digitalWrite(trigPin, LOW);
-
-    long duration = pulseIn(echoPin, HIGH, 30000UL);
-    if (duration == 0) return -1.0f;
-    return duration * 0.034f / 2.0f;
 }
 
 // ============================================================
@@ -277,8 +219,8 @@ void updateLCDRow(const TrafficLight& light, unsigned long now) {
         }
     } else {
         unsigned long elapsed   = now - light.redTimer;
-        unsigned long remaining = (elapsed < settings.redDuration)
-                                  ? settings.redDuration - elapsed : 0UL;
+        unsigned long remaining = (elapsed < settings.timerDuration)
+                                  ? settings.timerDuration - elapsed : 0UL;
         snprintf(buf, sizeof(buf), "ST-%-2d", (int)ceil(remaining / 1000.0f));
         lcd.print(buf);
     }
@@ -286,7 +228,6 @@ void updateLCDRow(const TrafficLight& light, unsigned long now) {
 
 // Redraws the full LCD; settings columns are only rewritten when changed
 void updateLCDDisplay(unsigned long now) {
-
     if (settings.triggerDistance != displayCache.triggerDistance) {
         displayCache.triggerDistance = settings.triggerDistance;
         char buf[7];
@@ -294,15 +235,13 @@ void updateLCDDisplay(unsigned long now) {
         lcd.setCursor(10, 0);
         lcd.print(buf);
     }
-
-    if (settings.redDuration != displayCache.redDuration) {
-        displayCache.redDuration = settings.redDuration;
+    if (settings.timerDuration != displayCache.timerDuration) {
+        displayCache.timerDuration = settings.timerDuration;
         char buf[7];
-        snprintf(buf, sizeof(buf), "T:%-3lu ", settings.redDuration / 1000UL);
+        snprintf(buf, sizeof(buf), "T:%-3lu ", settings.timerDuration / 1000UL);
         lcd.setCursor(10, 1);
         lcd.print(buf);
     }
-
     updateLCDRow(lightA, now);
     updateLCDRow(lightB, now);
 }
