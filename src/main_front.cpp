@@ -17,6 +17,8 @@
 // Front-specific constants (shared constants are in pit_bay_shared.h)
 constexpr unsigned long GREEN_CLEAR_DEBOUNCE    =  500UL;  // ms — kart must be clear before returning to WAITING
 constexpr unsigned long COUNTDOWN_CLEAR_TIMEOUT = 1000UL;  // ms — kart must be clear during stop to abort
+constexpr unsigned long SENSOR_PING_INTERVAL    =   20UL;  // ms — minimum time between pings per sensor (cross-talk prevention)
+constexpr uint8_t       SENSOR_TRIGGER_COUNT    =    2;    // consecutive hits required to transition out of WAITING
 
 // ============================================================
 //  Types
@@ -51,12 +53,14 @@ hd44780_pinIO lcd(LCD_RS, LCD_EN, LCD_DB4, LCD_DB5, LCD_DB6, LCD_DB7);
 TrafficLight lightA = {   11,  12,    A5,   A4,  'A',  0, 0.0f, WAITING,       0,          0,          0,      false,     0 };
 TrafficLight lightB = {    2,   3,    A3,   A2,  'B',  1, 0.0f, WAITING,       0,          0,          0,      false,     0 };
 
-Settings       settings     = { 50, 5000UL };
+Settings       settings     = { DEFAULT_DISTANCE, DEFAULT_DURATION };
 DisplayCache   displayCache = { -1, 0UL }; // -1 forces the first draw
 
 unsigned long  lastLcdUpdate     = 0;
 unsigned long  lastLedToggle     = 0;
 unsigned long  lastButtonTime    = 0; // debounce: single timer for the shared pin
+unsigned long  nextPingAt        = 0; // millis() when the next sensor ping is due
+uint8_t        nextPingLight     = 0; // 0 = ping lightA next, 1 = ping lightB next
 bool           ledState          = false;
 volatile bool  buttonPressedFlag = false; // set by ISR, processed in loop()
 
@@ -66,7 +70,7 @@ volatile bool  buttonPressedFlag = false; // set by ISR, processed in loop()
 
 void  initTrafficLight(const TrafficLight& light);
 void  setLightState(TrafficLight& light, LightState newState);
-void  updateTrafficLight(TrafficLight& light, unsigned long now);
+void  updateTrafficLight(TrafficLight& light, unsigned long now, bool distanceUpdated);
 void  updateLCDRow(const TrafficLight& light, unsigned long now);
 void  updateLCDDisplay(unsigned long now);
 void  buttonSharedISR();
@@ -93,6 +97,7 @@ void setup() {
     unsigned long now = millis();
     lastLcdUpdate = now;
     lastLedToggle = now;
+    nextPingAt    = now; // first ping fires immediately on the first loop iteration
 
     updateLCDDisplay(now); // draw initial screen
 }
@@ -104,11 +109,24 @@ void setup() {
 void loop() {
     unsigned long now = millis();
 
-    lightA.distance = readUltrasonicDistance(lightA.trigPin, lightA.echoPin);
-    lightB.distance = readUltrasonicDistance(lightB.trigPin, lightB.echoPin);
+    // Fire at most one sensor per slot; schedule the next slot after the blocking
+    // pulseIn call completes so the gap is measured in real elapsed time.
+    bool freshA = false, freshB = false;
+    if (now >= nextPingAt) {
+        if (nextPingLight == 0) {
+            lightA.distance = readUltrasonicDistance(lightA.trigPin, lightA.echoPin);
+            freshA = true;
+        } else {
+            lightB.distance = readUltrasonicDistance(lightB.trigPin, lightB.echoPin);
+            freshB = true;
+        }
+        nextPingLight = !nextPingLight;
+        nextPingAt    = millis() + SENSOR_PING_INTERVAL; // millis() — not now — accounts for pulseIn block time
+    }
 
-    updateTrafficLight(lightA, now);
-    updateTrafficLight(lightB, now);
+    now = millis(); // refresh after potential pulseIn block
+    updateTrafficLight(lightA, now, freshA);
+    updateTrafficLight(lightB, now, freshB);
 
     // Process button press here — analogRead (~104 µs) and settings writes
     // are unsafe inside an ISR on AVR, so the ISR only sets a flag.
@@ -135,8 +153,6 @@ void loop() {
         digitalWrite(LED_BUILTIN, ledState ? HIGH : LOW);
         lastLedToggle = now;
     }
-
-    delay(10);
 }
 
 // ============================================================
@@ -177,7 +193,7 @@ void setLightState(TrafficLight& light, LightState newState) {
 //  State machine — called every loop iteration for each light
 // ============================================================
 
-void updateTrafficLight(TrafficLight& light, unsigned long now) {
+void updateTrafficLight(TrafficLight& light, unsigned long now, bool distanceUpdated) {
     const int  trigDist = settings.triggerDistance;
     // A reading of -1 means no echo: treat as clear (no kart present)
     const bool present  = (light.distance > 0.0f && light.distance < trigDist);
@@ -186,13 +202,13 @@ void updateTrafficLight(TrafficLight& light, unsigned long now) {
 
         case WAITING:
             if (present) {
-                if (++light.triggerCount >= 3) {
+                if (distanceUpdated && ++light.triggerCount >= SENSOR_TRIGGER_COUNT) {
                     setLightState(light, COUNTDOWN);
                     light.countdownStart = now;
                     light.clearSince     = 0;
                     light.triggerCount   = 0;
                 }
-            } else {
+            } else if (distanceUpdated) {
                 light.triggerCount = 0;
             }
             break;
@@ -257,19 +273,19 @@ void updateLCDRow(const TrafficLight& light, unsigned long now) {
 
     if (light.state == WAITING) {
         if (light.distance < 0.0f) {
-            lcd.print("--- ");
+            lcd.print("---   ");
         } else {
-            snprintf(buf, sizeof(buf), "%-4d", (int)ceil(light.distance));
+            snprintf(buf, sizeof(buf), "%-6d", (int)ceil(light.distance));
             lcd.print(buf);
         }
     } else if (light.state == COUNTDOWN) {
         unsigned long elapsed   = now - light.countdownStart;
         unsigned long remaining = (elapsed < settings.timerDuration)
                                   ? settings.timerDuration - elapsed : 0UL;
-        snprintf(buf, sizeof(buf), "ST-%-2d", (int)ceil(remaining / 1000.0f));
+        snprintf(buf, sizeof(buf), "ST-%-3d", (int)ceil(remaining / 1000.0f));
         lcd.print(buf);
     } else {
-        lcd.print("GO   ");
+        lcd.print("GO    ");
     }
 }
 

@@ -12,8 +12,10 @@
 
 constexpr int           DISTANCE_STEP       =    5;    // cm
 constexpr int           DISTANCE_MAX        =  150;    // cm
+constexpr int           DEFAULT_DISTANCE    =  100;    // cm — initial trigger distance
 constexpr unsigned long TIME_STEP           = 1000UL;  // ms
 constexpr unsigned long RED_DURATION_MAX    = 120000UL;// ms (120 s)
+constexpr unsigned long DEFAULT_DURATION    = 10000UL; // ms — initial timer duration
 constexpr unsigned long DEBOUNCE_DELAY      =  200UL;  // ms
 constexpr unsigned long LCD_UPDATE_INTERVAL =  500UL;  // ms
 constexpr unsigned long LED_TOGGLE_INTERVAL =  500UL;  // ms
