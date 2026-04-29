@@ -15,7 +15,7 @@
 
 // Sensor / noise filter
 constexpr unsigned long SENSOR_PING_INTERVAL    =   20UL;  // ms — minimum time between pings per sensor (cross-talk prevention)
-constexpr uint8_t       SENSOR_TRIGGER_COUNT    =    2;    // consecutive hits required to transition out of WAITING
+constexpr uint8_t       SENSOR_TRIGGER_COUNT    =    3;    // consecutive hits required to transition out of WAITING
 
 // State-machine timings
 constexpr unsigned long GREEN_CLEAR_DEBOUNCE    =  500UL;  // ms — kart must be clear before returning to WAITING
