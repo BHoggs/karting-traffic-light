@@ -130,6 +130,7 @@ void setup() {
     initTrafficLight(lightA);
     initTrafficLight(lightB);
 
+    pinMode(BUTTON_PIN, INPUT_PULLUP); // float-guard: holds A0 high (~1023) when keypad is disconnected
     attachPCINT(digitalPinToPCINT(BUTTON_PIN), buttonSharedISR, FALLING);
 
     lcd.init();
