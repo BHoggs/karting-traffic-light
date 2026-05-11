@@ -15,6 +15,7 @@
 
 // Sensor / noise filter
 constexpr unsigned long SENSOR_PING_INTERVAL    =   20UL;  // ms — minimum time between pings per sensor (cross-talk prevention)
+constexpr unsigned long SENSOR_ECHO_TIMEOUT     = 30000UL; // µs — pulseIn timeout (~5 m max range); also used as ms delay when a channel is skipped
 constexpr uint8_t       SENSOR_TRIGGER_COUNT    =    3;    // consecutive hits required to transition out of WAITING
 
 // State-machine timings
@@ -28,6 +29,9 @@ constexpr int           DEFAULT_DISTANCE    =  100;    // cm — initial trigger
 constexpr unsigned long TIME_STEP           = 1000UL;  // ms
 constexpr unsigned long RED_DURATION_MAX    = 120000UL;// ms (120 s)
 constexpr unsigned long DEFAULT_DURATION    = 10000UL; // ms — initial timer duration
+
+// Sensor connection check
+constexpr unsigned long SENSOR_CHECK_INTERVAL  = 2000UL; // ms — how often to re-probe a disconnected sensor
 
 // Timing
 constexpr unsigned long DEBOUNCE_DELAY      =  200UL;  // ms
@@ -83,6 +87,8 @@ struct TrafficLight {
     unsigned long lastFlashToggle;// millis() of last red-LED flash toggle
     bool          redFlashOn;     // current flash output level during COUNTDOWN
     uint8_t       triggerCount;   // consecutive sensor hits in WAITING (noise filter)
+    bool          connected;      // false while the sensor is electrically absent
+    unsigned long lastConnectionCheck; // millis() of the last checkSensorConnection call
 };
 
 // ============================================================
@@ -91,9 +97,9 @@ struct TrafficLight {
 
 hd44780_pinIO lcd(LCD_RS, LCD_EN, LCD_DB4, LCD_DB5, LCD_DB6, LCD_DB7);
 
-//                       trig  echo  green  red   lbl  row  dist     state   cntStart  clearSince  flashToggle  flashOn  trgCnt
-TrafficLight lightA = {   11,  12,    A5,   A4,  'A',  0, 0.0f, WAITING,       0,          0,          0,      false,     0 };
-TrafficLight lightB = {    2,   3,    A3,   A2,  'B',  1, 0.0f, WAITING,       0,          0,          0,      false,     0 };
+//                       trig  echo  green  red   lbl  row  dist     state   cntStart  clearSince  flashToggle  flashOn  trgCnt   conn  lastConnChk
+TrafficLight lightA = {   11,  12,    A5,   A4,  'A',  0, 0.0f, WAITING,       0,          0,          0,      false,     0,  false,        0 };
+TrafficLight lightB = {    2,   3,    A3,   A2,  'B',  1, 0.0f, WAITING,       0,          0,          0,      false,     0,  false,        0 };
 
 Settings       settings     = { DEFAULT_DISTANCE, DEFAULT_DURATION };
 DisplayCache   displayCache = { -1, 0UL }; // -1 forces the first draw
@@ -112,6 +118,7 @@ volatile bool  buttonPressedFlag = false; // set by ISR, processed in loop()
 
 void  initTrafficLight(const TrafficLight& light);
 void  setLightState(TrafficLight& light, LightState newState);
+bool  checkSensorConnection(TrafficLight& light);
 void  updateTrafficLight(TrafficLight& light, unsigned long now, bool distanceUpdated);
 void  updateLCDRow(const TrafficLight& light, unsigned long now);
 void  updateLCDDisplay(unsigned long now);
@@ -130,19 +137,28 @@ void setup() {
     initTrafficLight(lightA);
     initTrafficLight(lightB);
 
+    // LED test sequence — flash every LED once so the operator can verify wiring
+    digitalWrite(lightA.redPin,   HIGH); delay(250); digitalWrite(lightA.redPin,   LOW);
+    digitalWrite(lightA.greenPin, HIGH); delay(250); digitalWrite(lightA.greenPin, LOW);
+    digitalWrite(lightB.redPin,   HIGH); delay(250); digitalWrite(lightB.redPin,   LOW);
+    digitalWrite(lightB.greenPin, HIGH); delay(250); digitalWrite(lightB.greenPin, LOW);
+
     pinMode(BUTTON_PIN, INPUT_PULLUP); // float-guard: holds A0 high (~1023) when keypad is disconnected
     attachPCINT(digitalPinToPCINT(BUTTON_PIN), buttonSharedISR, FALLING);
 
     lcd.init();
     lcd.backlight();
 
-    setLightState(lightA, WAITING);
-    setLightState(lightB, WAITING);
+    // Probe sensors at boot; setLightState(WAITING) is called inside
+    // checkSensorConnection if a sensor is found to be connected.
+    // LEDs stay off for any channel that is absent.
+    checkSensorConnection(lightA);
+    checkSensorConnection(lightB);
 
     unsigned long now = millis();
-    lastLcdUpdate = now;
-    lastLedToggle = now;
-    nextPingAt    = now; // first ping fires immediately on the first loop iteration
+    lastLcdUpdate    = now;
+    lastLedToggle    = now;
+    nextPingAt       = now; // first ping fires immediately on the first loop iteration
 
     updateLCDDisplay(now); // draw initial screen
 }
@@ -154,16 +170,32 @@ void setup() {
 void loop() {
     unsigned long now = millis();
 
-    // Fire at most one sensor per slot; schedule the next slot after the blocking
-    // pulseIn call completes so the gap is measured in real elapsed time.
+    // While one channel is being pinged, check the other channel's connection —
+    // its echo pin is guaranteed idle so there's no risk of a false HIGH read.
     bool freshA = false, freshB = false;
     if (now >= nextPingAt) {
         if (nextPingLight == 0) {
-            lightA.distance = readUltrasonicDistance(lightA.trigPin, lightA.echoPin);
-            freshA = true;
+            if (lightA.connected) {
+                lightA.distance = readUltrasonicDistance(lightA.trigPin, lightA.echoPin);
+                freshA = true;
+            } else {
+                delay(SENSOR_ECHO_TIMEOUT / 1000UL); // match pulseIn timeout so B's echo has settled before we read it
+            }
+            if (now - lightB.lastConnectionCheck >= SENSOR_CHECK_INTERVAL) {
+                checkSensorConnection(lightB); // B's echo is idle while A is being pinged
+                lightB.lastConnectionCheck = now;
+            }
         } else {
-            lightB.distance = readUltrasonicDistance(lightB.trigPin, lightB.echoPin);
-            freshB = true;
+            if (lightB.connected) {
+                lightB.distance = readUltrasonicDistance(lightB.trigPin, lightB.echoPin);
+                freshB = true;
+            } else {
+                delay(SENSOR_ECHO_TIMEOUT / 1000UL); // match pulseIn timeout so A's echo has settled before we read it
+            }
+            if (now - lightA.lastConnectionCheck >= SENSOR_CHECK_INTERVAL) {
+                checkSensorConnection(lightA); // A's echo is idle while B is being pinged
+                lightA.lastConnectionCheck = now;
+            }
         }
         nextPingLight = !nextPingLight;
         nextPingAt    = millis() + SENSOR_PING_INTERVAL; // millis() — not now — accounts for pulseIn block time
@@ -207,7 +239,7 @@ void loop() {
 // Configures the GPIO pins for one traffic-light channel
 void initTrafficLight(const TrafficLight& light) {
     pinMode(light.trigPin,  OUTPUT);
-    pinMode(light.echoPin,  INPUT);
+    pinMode(light.echoPin,  INPUT_PULLUP); // pull-up stays on permanently; HC-SR04 drives push-pull so it causes no interference
     pinMode(light.greenPin, OUTPUT);
     pinMode(light.redPin,   OUTPUT);
 }
@@ -235,10 +267,43 @@ void setLightState(TrafficLight& light, LightState newState) {
 }
 
 // ============================================================
+//  Sensor connection check
+// ============================================================
+
+// An HC-SR04 echo pin is held LOW by the sensor when idle.  With INPUT_PULLUP
+// enabled and no sensor attached the pin floats HIGH.  We exploit this to
+// detect a missing sensor without any extra hardware.
+//
+// Side effects when the connection state changes:
+//   disconnected → turn off both LEDs and reset to WAITING
+//   reconnected  → restore WAITING LED state via setLightState()
+bool checkSensorConnection(TrafficLight& light) {
+    bool floatingHigh = digitalRead(light.echoPin);
+
+    bool wasConnected = light.connected;
+    light.connected   = !floatingHigh; // LOW = sensor present (driven), HIGH = floating/absent
+
+    if (!light.connected) {
+        // Blank the channel immediately and reset so reconnection starts clean
+        digitalWrite(light.greenPin, LOW);
+        digitalWrite(light.redPin,   LOW);
+        light.state        = WAITING;
+        light.triggerCount = 0;
+        light.clearSince   = 0;
+    } else if (!wasConnected) {
+        // Just reconnected — drive LEDs to the correct WAITING state
+        setLightState(light, WAITING);
+    }
+    return light.connected;
+}
+
+// ============================================================
 //  State machine — called every loop iteration for each light
 // ============================================================
 
 void updateTrafficLight(TrafficLight& light, unsigned long now, bool distanceUpdated) {
+    if (!light.connected) return; // sensor absent — LEDs already blanked by checkSensorConnection
+
     const int  trigDist = settings.triggerDistance;
     // A reading of -1 means no echo: treat as clear (no kart present)
     const bool present  = (light.distance > 0.0f && light.distance < trigDist);
@@ -316,6 +381,11 @@ void updateLCDRow(const TrafficLight& light, unsigned long now) {
     lcd.print(light.label);
     lcd.print(':');
 
+    if (!light.connected) {
+        lcd.print("OFF   ");
+        return;
+    }
+
     if (light.state == WAITING) {
         if (light.distance < 0.0f) {
             lcd.print("---   ");
@@ -375,7 +445,7 @@ float readUltrasonicDistance(int trigPin, int echoPin) {
     delayMicroseconds(10);
     digitalWrite(trigPin, LOW);
 
-    long duration = pulseIn(echoPin, HIGH, 30000UL);
+    long duration = pulseIn(echoPin, HIGH, SENSOR_ECHO_TIMEOUT);
     if (duration == 0) return -1.0f;
     return duration * 0.034f / 2.0f;
 }
