@@ -19,7 +19,7 @@ constexpr unsigned long SENSOR_ECHO_TIMEOUT     = 30000UL; // µs — pulseIn ti
 constexpr uint8_t       SENSOR_TRIGGER_COUNT    =    3;    // consecutive hits required to transition out of WAITING
 
 // State-machine timings
-constexpr unsigned long GREEN_CLEAR_DEBOUNCE    =  500UL;  // ms — kart must be clear before returning to WAITING
+constexpr unsigned long GREEN_CLEAR_DEBOUNCE    =  200UL;  // ms — kart must be clear before returning to WAITING
 constexpr unsigned long COUNTDOWN_CLEAR_TIMEOUT = 1000UL;  // ms — kart must be clear during stop to abort
 
 // User-adjustable settings — range and defaults
@@ -60,14 +60,14 @@ constexpr int LCD_DB7    =  7;
 
 // User-adjustable settings (read and written only in loop())
 struct Settings {
-    int           triggerDistance; // cm
-    unsigned long timerDuration;   // ms — stop/countdown timer
+    int           triggerDistance = DEFAULT_DISTANCE; // cm
+    unsigned long timerDuration   = DEFAULT_DURATION; // ms — stop/countdown timer
 };
 
 // Cached copies of displayed settings — avoids redundant LCD writes
 struct DisplayCache {
-    int           triggerDistance;
-    unsigned long timerDuration;
+    int           triggerDistance = -1;  // -1 forces the first draw
+    unsigned long timerDuration   = 0UL;
 };
 
 enum LightState : uint8_t { WAITING, COUNTDOWN, GO };
@@ -78,17 +78,17 @@ struct TrafficLight {
     int           echoPin;
     int           greenPin;
     int           redPin;
-    char          label;          // 'A' or 'B' — used for the LCD prefix
-    uint8_t       lcdRow;         // 0 or 1
-    float         distance;       // Latest sensor reading in cm; -1 = no echo
-    LightState    state;
-    unsigned long countdownStart; // millis() when COUNTDOWN was entered
-    unsigned long clearSince;     // millis() when sensor first became clear; 0 while tripped
-    unsigned long lastFlashToggle;// millis() of last red-LED flash toggle
-    bool          redFlashOn;     // current flash output level during COUNTDOWN
-    uint8_t       triggerCount;   // consecutive sensor hits in WAITING (noise filter)
-    bool          connected;      // false while the sensor is electrically absent
-    unsigned long lastConnectionCheck; // millis() of the last checkSensorConnection call
+    char          label;                         // 'A' or 'B' — used for the LCD prefix
+    uint8_t       lcdRow;                        // 0 or 1
+    float         distance           = 0.0f;     // Latest sensor reading in cm; -1 = no echo
+    LightState    state              = WAITING;
+    unsigned long countdownStart     = 0;        // millis() when COUNTDOWN was entered
+    unsigned long clearSince         = 0;        // millis() when sensor first became clear; 0 while tripped
+    unsigned long lastFlashToggle    = 0;        // millis() of last red-LED flash toggle
+    bool          redFlashOn         = false;    // current flash output level during COUNTDOWN
+    uint8_t       triggerCount       = 0;        // consecutive sensor hits in WAITING (noise filter)
+    bool          connected          = false;    // false while the sensor is electrically absent
+    unsigned long lastConnectionCheck = 0;       // millis() of the last checkSensorConnection call
 };
 
 // ============================================================
@@ -97,12 +97,11 @@ struct TrafficLight {
 
 hd44780_pinIO lcd(LCD_RS, LCD_EN, LCD_DB4, LCD_DB5, LCD_DB6, LCD_DB7);
 
-//                       trig  echo  green  red   lbl  row  dist     state   cntStart  clearSince  flashToggle  flashOn  trgCnt   conn  lastConnChk
-TrafficLight lightA = {   11,  12,    A5,   A4,  'A',  0, 0.0f, WAITING,       0,          0,          0,      false,     0,  false,        0 };
-TrafficLight lightB = {    2,   3,    A3,   A2,  'B',  1, 0.0f, WAITING,       0,          0,          0,      false,     0,  false,        0 };
+TrafficLight lightA = { 11, 12, A5, A4, 'A', 0 };
+TrafficLight lightB = {  2,  3, A3, A2, 'B', 1 };
 
-Settings       settings     = { DEFAULT_DISTANCE, DEFAULT_DURATION };
-DisplayCache   displayCache = { -1, 0UL }; // -1 forces the first draw
+Settings     settings;
+DisplayCache displayCache;
 
 unsigned long  lastLcdUpdate     = 0;
 unsigned long  lastLedToggle     = 0;
