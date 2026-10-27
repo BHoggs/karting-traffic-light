@@ -349,11 +349,24 @@ void updateTrafficLight(TrafficLight& light, unsigned long now, bool distanceUpd
             break;
 
         case GO:
-            // Track how long the sensor has been clear
-            if (present) {
-                light.clearSince = 0;
-            } else if (light.clearSince == 0) {
-                light.clearSince = now;
+            if (distanceUpdated) {
+                if (present) {
+                    // Seen again after a gap — a new kart is arriving as the last one leaves.
+                    // triggerCount is unused in GO, so it counts the new kart's hits here.
+                    if (light.clearSince != 0 || light.triggerCount > 0) {
+                        if (++light.triggerCount >= SENSOR_TRIGGER_COUNT) {
+                            setLightState(light, COUNTDOWN);
+                            light.countdownStart = now;
+                            light.clearSince     = 0;
+                            light.triggerCount   = 0;
+                            break;
+                        }
+                    }
+                    light.clearSince = 0;
+                } else {
+                    light.triggerCount = 0;
+                    if (light.clearSince == 0) light.clearSince = now;
+                }
             }
             // Kart has cleared — return to WAITING
             if (light.clearSince != 0 &&
